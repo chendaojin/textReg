@@ -24,21 +24,20 @@ from keras import backend as K
 from keras.layers import Lambda
 from keras.optimizers import SGD
 
+#用于每轮结束后及训练完成后保存权值，每轮结束后，轮流用modelWeights0.h5和modelWeights1.h5保存，结束后覆盖modelWeights.h5,只保存loss变小的轮次
 class modelHistory(Callback):
     def __init__(self,filepath=''):
         self.filepath=filepath
         self.lastfile=None
         self.lastloss=-1
+        self.lastName=0
         
     def on_epoch_end(self,epoch=0,logs=None):
-        if epoch==0:
-            self.model.save_weights(self.filepath+str(epoch%2)+'.h5')
-            self.lastfile=self.filepath+str(epoch%2)+'.h5'
+        if epoch==0 or logs['loss'] <= self.lastloss:
+            self.model.save_weights(self.filepath+str(lastName)+'.h5')
+            self.lastfile=self.filepath+str(lastName)+'.h5'
             self.lastloss=logs['loss']
-        elif logs['loss'] <= self.lastloss:
-            self.model.save_weights(self.filepath+str(epoch%2)+'.h5')
-            self.lastfile=self.filepath+str(epoch%2)+'.h5'
-            self.lastloss=logs['loss']
+            self.lastName=(self.lastName+1)%2
         else:
             print('not in')
         '''
@@ -82,16 +81,26 @@ class textReg:
         self.weightFile='modelWeights'
         self.saveNow='0'
         self.model=None
-
-
+    #生成字典,flag=True表示该目录是最后一个用于生成字典的目录
+    def getDic(self,textDir,flag):
+        for parent,dirname,filenames in os.walk(textDir):
+            for filename in filenames:
+                if filename[-3:]=='txt':
+                    tx1=pd.read_csv(textDir+R'\\'+filename,header=None,quoting=3,sep='.[0-9]{1,2},',
+                                        encoding='utf-8',engine='python')
+                    tx1.apply(lambda x:self.characters.update(str(x[8])) if x[8] != '###' and x[8] !='' else 0,axis=1)
+        print(self.characters,len(self.characters))
+        if flag:
+            self.dic=dict(zip(self.characters,range(len(self.characters))))
+            with open('dic1.pkl','wb') as f:
+                pickle.dump(self.dic,f)
+            self.dic={}
 
     def save(self):
-        with open('rawY.pkl','wb') as f:
+        with open('rawY1.pkl','wb') as f:
             pickle.dump(self.text,f)
-        with open('rawX.pkl','wb') as f:
+        with open('rawX1.pkl','wb') as f:
             pickle.dump(self.pic,f)
-        with open('characters.pkl','wb') as f:
-            pickle.dump(self.characters,f)
             
         #原始数据
         self.text=[]
@@ -99,14 +108,7 @@ class textReg:
         self.num=0
         self.img=None
         
-
-        #字典
-        self.characters=set()
-        self.dic={}
-        self.nclass=0
-        self.ch=[]
         
-
     def cut(self,x):
         if x[8]=='###' or x[8]=='':
             return
@@ -120,7 +122,7 @@ class textReg:
         M = cv.getPerspectiveTransform(pts1,pts2)
         perspective = cv.warpPerspective(self.img,M,(max(l0,l2),max(l1,l3)))
         #resize the image
-        perspective=cv.resize(perspective,(self.width,self.height))
+        #perspective=cv.resize(perspective,(self.width,self.height))
         
         if ' ' in set(str(x[8])):
             print(str(x[8]))
@@ -129,10 +131,8 @@ class textReg:
             cv.imwrite('data\\'+str(self.num)+'.jpg',perspective)
             print(perspective.shape)
             print(x[8])
-            
+        
         self.text.append(str(x[8]))
-        self.characters.update(str(x[8]))
-        self.nclass=len(self.characters)
         self.pic.append(perspective)
         self.num+=1
     def cutPictures(self,imageDir,textDir):
@@ -154,7 +154,6 @@ class textReg:
                         print('error',filename)
                         continue
                     tx1.apply(self.cut,axis=1)
-        self.dic=dict(zip(self.characters,range(len(self.characters))))
         #print(self.dic)
     def one_hot(self,maxLabelLength,text):
         #print('test:',text)
@@ -171,22 +170,35 @@ class textReg:
             self.text=pickle.load(f)
         with open('rawX.pkl','rb') as f:
             self.pic=pickle.load(f)
+        self.num=len(self.pic)
+        
+    def loadModel(self,flag):
+        #加载字典,字典大小与模型相关
         with open('dic.pkl','rb') as f:
             self.dic=pickle.load(f)
-        self.text=self.text[:10000]
-        self.pic=self.pic[:10000]
+        with open('dic1.pkl','rb') as f:
+            dic1=pickle.load(f)
+        print(set(self.dic.keys())-set(dic1.keys()),set(dic1.keys())-set(self.dic.keys()))
         self.nclass=len(self.dic)
-        self.num=len(self.pic)
         self.characters=set(self.dic)
-        self.ch=[0]*self.num
+        self.ch=[0]*self.nclass
+        print('nclass: ',self.nclass)
         for u in self.dic.items():
-        	self.ch[u[1]]=u[0]
+            self.ch[u[1]]=u[0]
 
         print('check the dic')
         for i in range(self.nclass):
-        	if self.dic[self.ch[i]]!=i:
-        		print('dic error -------------')
-       	print('end check dic')
+            if self.dic[self.ch[i]]!=i:
+                print('dic error -------------')
+        print('end check dic')
+
+        #加载模型,flag=True表示用于训练,反之用于预测
+        self.model=self.getmodel(self.height,flag)
+        if os.path.exists(self.weightFile+'.h5'):
+            self.model.load_weights(self.weightFile+'.h5',by_name=True)
+        else :
+            print('not exist modelWeights.h5')
+
     def train(self):
         
         input_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,self.pic[:int(self.num*self.rateTrain)])))
@@ -195,17 +207,10 @@ class textReg:
         Y=np.array(list(map(lambda x:self.one_hot(maxLabelLength,x),self.text[:int(self.num*self.rateTrain)])),
                    dtype=object)
         X=np.array(self.pic[:int(self.num*self.rateTrain)],dtype=object)
-        print(X.shape,Y.shape)
-        model=self.getmodel(self.height,1)
-        if os.path.exists(self.weightFile+'.h5'):
-            model.load_weights(self.weightFile+'.h5',by_name=True)
-        else :
-        	print('not exist')
 
         checkpoint=modelHistory(self.weightFile)
         callbacks_list = [checkpoint]
-
-        model.fit([X,Y,input_length,label_length],np.ones(X.shape[0]),batch_size=self.batch_size,epochs=self.epochs,
+        self.model.fit([X,Y,input_length,label_length],np.ones(X.shape[0]),batch_size=self.batch_size,epochs=self.epochs,
                   callbacks=callbacks_list)
 
     def predict(self):
@@ -216,9 +221,7 @@ class textReg:
             input_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,self.pic[:l])))
             label_length=np.array(list(map(lambda x:len(x),self.text[:l])))
             print(X.shape,Y.shape,input_length.shape)
-            model=self.getmodel(128,0)
-            model.load_weights('modelWeights.h5')
-            pre=model.predict(X)
+            pre=self.model.predict(X)
             print([max(pre[u])] for u in range(pre.shape[0]))
             print(pre)
             pre=K.ctc_decode(pre,input_length,greedy=False,beam_width=6,top_paths=3)
@@ -252,7 +255,7 @@ class textReg:
     def ctc_lambda_func(self,args):
         y_pred, labels, input_length, label_length = args
         return K.ctc_batch_cost(labels, y_pred, input_length, label_length)
-    def getmodel(self,height,flag):#if flag=0,return basemodel,if flag =1 return model
+    def getmodel(self,height,flag):#if flag=False,return basemodel,if flag =True return model
         rnnunit  = 256
         input = Input(shape=(height,None,3),name='the_input')
         m = Conv2D(64,kernel_size=(3,3),activation='relu',padding='same',name='conv1')(input)
@@ -280,7 +283,7 @@ class textReg:
         m = Dense(rnnunit,name='blstm1_out',activation='linear')(m)
         m = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstm2')(m)
         y_pred = Dense(self.nclass+1,name='blstm2_out_1',activation='softmax')(m)
-        if flag==0:
+        if not flag:
             basemodel = Model(inputs=input,outputs=y_pred)
             basemodel.summary()
             return basemodel
@@ -299,17 +302,20 @@ class textReg:
 
 if __name__=='__main__':
     reg=textReg()
-    #reg.cutPictures(R'data\image_1000',R'data\txt_1000')
-    #reg.save()
-
-    reg.loadData()
-    print(reg)
-    print(reg.nclass)
-    for i in range(reg.nclass):
-    	#print(i)
-    	if reg.dic[reg.ch[i]] != i:
-        	print('dic error')
-    reg.train()
-    #reg.train()
-    #reg.retrain()
-    #reg.predict()
+    type=1
+    #用于生成字典,
+    if type==0:
+        reg.getDic(R'data\txt_1000',True)
+    #用于切割文本行或列
+    if type==1:
+        reg.cutPictures(R'data\image_1000',R'data\txt_1000')
+        reg.save()
+    #用于训练
+    if type==2:
+        reg.loadModel(True)
+        reg.loadData()
+        reg.train()
+    if type==3:
+        reg.loadModel(False)
+        reg.loadData()
+        reg.predict()
