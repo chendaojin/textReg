@@ -5,8 +5,10 @@ Created on Sun Apr 22 14:16:17 2018
 @author: whao
 """
 import cv2 as cv
+import random
 import os
 import pickle
+import sys
 import numpy as np
 import pandas as pd
 import keras.backend as K
@@ -58,8 +60,7 @@ class textReg:
     def __init__(self):
         
         #原始数据
-        self.text=[]
-        self.pic=[]
+        self.data=[]#每个元数据是(pic,text)
         self.num=0
         self.img=None
         
@@ -97,11 +98,11 @@ class textReg:
             self.dic={}
 
     def save(self):
-        with open('rawY1.pkl','wb') as f:
-            pickle.dump(self.text,f)
-        with open('rawX1.pkl','wb') as f:
-            pickle.dump(self.pic,f)
-            
+        random.shuffle(self.data)
+        with open('data.pkl','wb') as f:
+            pickle.dump(self.data,f)
+
+        
         #原始数据
         self.text=[]
         self.pic=[]
@@ -132,8 +133,7 @@ class textReg:
             print(perspective.shape)
             print(x[8])
         
-        self.text.append(str(x[8]))
-        self.pic.append(perspective)
+        self.data.append((perspective,str(x[8])))
         self.num+=1
     def cutPictures(self,imageDir,textDir):
         for parent,dirname,filenames in os.walk(imageDir):
@@ -160,17 +160,26 @@ class textReg:
         label = np.zeros(maxLabelLength,dtype=int)
         #label[0]=charactersNum
         for i, char in enumerate(text):
+            if char not in self.dic.keys():
+                label[i]=0
+                continue
             index = self.dic[char]
             label[i] = int(index)
             #label[i*2+2]=charactersNum
             #print(label.shape)
         return label
     def loadData(self):
-        with open('rawY.pkl','rb') as f:
-            self.text=pickle.load(f)
-        with open('rawX.pkl','rb') as f:
-            self.pic=pickle.load(f)
-        self.num=len(self.pic)
+        with open('data.pkl','rb') as f:
+            self.data=pickle.load(f)
+        self.data=self.data[:1000]
+        #random.shuffle(self.data)
+        self.num=len(self.data)
+        """
+        for i in range(self.num):
+            print(self.data[i][1])
+            cv.imshow(str(i),self.data[i][0])
+            cv.waitKey(0)
+        """
         
     def loadModel(self,flag):
         #加载字典,字典大小与模型相关
@@ -198,37 +207,78 @@ class textReg:
             self.model.load_weights(self.weightFile+'.h5',by_name=True)
         else :
             print('not exist modelWeights.h5')
-
-    def train(self):
+    def gen(self,data,flag):
         
+        while True:
+            i = 0
+            n = len(data)
+            X=[]
+            Y=[]
+            cnt=0
+            for i in range(n):
+                '''
+                数据增强，加水平翻转，垂直翻转，对角线旋转
+                '''
+                img=data[i][0]
+                Y.append(data[i][1])
+                if flag=='train':
+                    flip_h=cv.flip(img,1)
+                    flip_v=cv.flip(img,0)
+                    flip_hv=cv.flip(img,-1)
+                    X.append(cv.resize(img,(self.width,self.height)))
+                    X.append(cv.resize(flip_h,(self.width,self.height)))
+                    X.append(cv.resize(flip_v,(self.width,self.height)))
+                    X.append(cv.resize(flip_hv,(self.width,self.height)))
+                    Y.append(data[i][1])
+                    Y.append(data[i][1])
+                    Y.append(data[i][1])
+                    cnt+=4
+                else:
+                    cnt+=1
+                if cnt==self.batch_size or i==n-1:
+                    input_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,X)))
+                    label_length=np.array(list(map(lambda x:len(x),Y)))
+                    maxLabelLength=max(label_length)
+                    nowY=np.array(list(map(lambda x:self.one_hot(maxLabelLength,x),Y)),
+                               dtype=object)
+                    nowX=np.array(X)
+                    yield ([nowX,nowY,input_length,label_length],np.ones(cnt))
+                    X=[]
+                    Y=[]
+                    cnt=0
+                    
+    def train(self):
+
+        ##input_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,self.pic[])))
+        checkpoint=modelHistory(self.weightFile)
+        callbacks_list = [checkpoint]
+        trainNum=int(self.num*self.rateTrain)
+        valiNum=self.num-trainNum
+        print('steps_per_epoch=',(trainNum*4-1)//self.batch_size+1)
+        self.model.fit_generator(self.gen(self.data[:trainNum]),steps_per_epoch=(trainNum*4-1)//self.batch_size+1,epochs=self.epochs,
+                            callbacks=callbacks_list,validation_data=self.gen(self.data[-valiNum:]),
+                            validation_steps=(valiNum*4-1)//self.batch_size+1)
+
+    def predict(self):
         input_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,self.pic[:int(self.num*self.rateTrain)])))
         label_length=np.array(list(map(lambda x:len(x),self.text[:int(self.num*self.rateTrain)])))
         maxLabelLength=max(label_length)
-        Y=np.array(list(map(lambda x:self.one_hot(maxLabelLength,x),self.text[:int(self.num*self.rateTrain)])),
-                   dtype=object)
-        X=np.array(self.pic[:int(self.num*self.rateTrain)],dtype=object)
-
-        checkpoint=modelHistory(self.weightFile)
-        callbacks_list = [checkpoint]
-        self.model.fit([X,Y,input_length,label_length],np.ones(X.shape[0]),batch_size=self.batch_size,epochs=self.epochs,
-                  callbacks=callbacks_list)
-
-    def predict(self):
+        Y=np.array(list(map(lambda x:self.one_hot(maxLabelLength,x),self.text[:int(self.num*self.rateTrain)])))
+        X=np.array(self.pic[:int(self.num*self.rateTrain)])
         for _ in range(10):
-            l=5
-            Y=np.array(list(map(lambda x:self.one_hot(50,x),self.text[:l])),dtype=object)
-            X=np.array(self.pic[:l],dtype=object)
-            input_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,self.pic[:l])))
-            label_length=np.array(list(map(lambda x:len(x),self.text[:l])))
+            l=50
+            input_length=input_length[:l]
+            label_length=label_length[:l]
+            Y=Y[:l]
+            X=X[:l]
             print(X.shape,Y.shape,input_length.shape)
             pre=self.model.predict(X)
             print([max(pre[u])] for u in range(pre.shape[0]))
             print(pre)
             pre=K.ctc_decode(pre,input_length,greedy=False,beam_width=6,top_paths=3)
             pre=pre[0][0].eval(session=tf.Session())
-            print(type(pre))
+            #print(type(pre))
             print(pre.shape)
-            ch=list(self.characters)
         
             for i in range(l):
                 
@@ -239,13 +289,13 @@ class textReg:
                 for j in range(pre.shape[1]):
                     if pre[i][j] == -1:
                         break
-                    res1=res1+ch[pre[i][j]]
+                    res1=res1+self.ch[pre[i][j]]
                 print(label_length[i])
                 for j in range(label_length[i]):
                     #print(Y[j])
-                    res2=res2+ch[Y[i][j]]
+                    res2=res2+self.ch[Y[i][j]]
                 print(res1,res2)
-                cv.imshow(str(i),self.pic[i])
+                cv.imshow(str(i),X[i])
                 cv.waitKey(0)
 
         '''
@@ -275,8 +325,14 @@ class textReg:
         m = ZeroPadding2D(padding=(0,1))(m)#width+2
         m = MaxPooling2D(pool_size=(2,2),strides=(2,1),padding='valid',name='pool4')(m)#height/2,width-1
         m = Conv2D(512,kernel_size=(2,2),activation='relu',padding='valid',name='conv7')(m)#height-1,width-1
-    
+        
+        m1 = TimeDistributed(Flatten(),name='timedistrib')(m)
+        m1 = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstmv1')(m1)
+        m1 = Dense(rnnunit,name='blstm1_out',activation='linear')(m1)
+        m1 = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstmv2')(m1)
+        
         m = Permute((2,1,3),name='permute')(m)
+        
         m = TimeDistributed(Flatten(),name='timedistrib')(m)
     
         m = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstm1')(m)
@@ -284,6 +340,7 @@ class textReg:
         m = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstm2')(m)
         y_pred = Dense(self.nclass+1,name='blstm2_out_1',activation='softmax')(m)
         if not flag:
+            print('not in ')
             basemodel = Model(inputs=input,outputs=y_pred)
             basemodel.summary()
             return basemodel
@@ -297,25 +354,50 @@ class textReg:
         
         model.compile(loss={'ctc': lambda y_true, y_pred: y_pred}, optimizer=sgd)
         model.summary()
+        
         return model
-    
+    def test(self):
+        reg.loadModel(True)
+        reg.loadData()
+        for i in range(3):
+            img=self.data[i][0]
+            '''
+            flipud=tf.image.flip_up_down(img)
+            fliplr=tf.image.flip_left_right(img)
+            flipt=tf.image.transpose_image(img)
+            '''
+            flip_h=cv.flip(img,1)
+            flip_v=cv.flip(img,0)
+            flip_hv=cv.flip(img,-1)
+            cv.imshow('raw image',img)
+            cv.imshow('flipud',flip_h)
+            cv.imshow('fliplr',flip_v)
+            cv.imshow('flipt',flip_hv)
+            cv.waitKey(0)
+            cv.destroyAllWindows()
+        
 
 if __name__=='__main__':
+    args=sys.argv
+    print(args)
     reg=textReg()
-    type=1
+    type=args[1]
+    print(type)
     #用于生成字典,
-    if type==0:
-        reg.getDic(R'data\txt_1000',True)
+    if type=='getDic':
+        reg.getDic(R'data\txt',True)
     #用于切割文本行或列
-    if type==1:
-        reg.cutPictures(R'data\image_1000',R'data\txt_1000')
+    if type=='cutPictures':
+        reg.cutPictures(R'data\image',R'data\txt')
         reg.save()
     #用于训练
-    if type==2:
+    if type=='train':
         reg.loadModel(True)
         reg.loadData()
         reg.train()
-    if type==3:
+    if type=='predic':
         reg.loadModel(False)
         reg.loadData()
-        reg.predict()
+        #reg.predict()
+    if type=='test':
+        reg.test()
