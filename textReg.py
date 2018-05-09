@@ -12,6 +12,7 @@ import sys
 import numpy as np
 import pandas as pd
 import keras.backend as K
+import matplotlib.pyplot as plt
 import tensorflow as tf
 from keras.models import Model
 from keras.models import Sequential
@@ -36,8 +37,8 @@ class modelHistory(Callback):
         
     def on_epoch_end(self,epoch=0,logs=None):
         if epoch==0 or logs['loss'] <= self.lastloss:
-            self.model.save_weights(self.filepath+str(lastName)+'.h5')
-            self.lastfile=self.filepath+str(lastName)+'.h5'
+            self.model.save_weights(self.filepath+str(self.lastName)+'.h5')
+            self.lastfile=self.filepath+str(self.lastName)+'.h5'
             self.lastloss=logs['loss']
             self.lastName=(self.lastName+1)%2
         else:
@@ -106,6 +107,7 @@ class textReg:
         #原始数据
         self.text=[]
         self.pic=[]
+        self.filfname=None
         self.num=0
         self.img=None
         
@@ -113,26 +115,30 @@ class textReg:
     def cut(self,x):
         if x[8]=='###' or x[8]=='':
             return
-        pts = np.array([[x[0],x[1]],[x[6]+2,x[7]],[x[4]+2,x[5]+2],[x[2],x[3]+2]], np.int32)
+        pts = np.array([[x[0]-1,x[1]-1],[x[6]+1,x[7]-1],[x[4]+1,x[5]+1],[x[2]-1,x[3]+1]], np.int32)
         l0=int(np.sqrt((pts[1][0]-pts[0][0])**2+(pts[1][1]-pts[0][1])**2))
         l1=int(np.sqrt((pts[2][0]-pts[1][0])**2+(pts[2][1]-pts[1][1])**2))
         l2=int(np.sqrt((pts[3][0]-pts[2][0])**2+(pts[3][1]-pts[2][1])**2))
         l3=int(np.sqrt((pts[0][0]-pts[3][0])**2+(pts[0][1]-pts[3][1])**2))
+        lw=max(l0,l2)
+        lh=max(l1,l3)
+        if lw*lh<=50 or lw <=6 or lh<=6:
+            return
         pts1=np.float32(pts)
-        pts2=np.float32([[0,0],[max(l0,l2),0],[max(l0,l2),max(l1,l3)],[0,max(l1,l3)]])    
+        pts2=np.float32([[0,0],[lw,0],[lw,lh],[0,lh]])    
         M = cv.getPerspectiveTransform(pts1,pts2)
-        perspective = cv.warpPerspective(self.img,M,(max(l0,l2),max(l1,l3)))
-        #resize the image
-        #perspective=cv.resize(perspective,(self.width,self.height))
-        
+        perspective = cv.warpPerspective(self.img,M,(lw,lh))
         if ' ' in set(str(x[8])):
             print(str(x[8]))
-            
         if self.num%3000 == 0:
             cv.imwrite('data\\'+str(self.num)+'.jpg',perspective)
             print(perspective.shape)
             print(x[8])
-        
+        if x[8]=='小童话?大智慧?小百科?大启发':
+            print(l0,l1,l2,l3)
+            print(pts)
+            cv.imshow('cut',perspective)
+            cv.waitKey(0)
         self.data.append((perspective,str(x[8])))
         self.num+=1
     def cutPictures(self,imageDir,textDir):
@@ -153,6 +159,7 @@ class textReg:
                     else:
                         print('error',filename)
                         continue
+                    self.filfname=filename
                     tx1.apply(self.cut,axis=1)
         #print(self.dic)
     def one_hot(self,maxLabelLength,text):
@@ -357,8 +364,9 @@ class textReg:
         
         return model
     def test(self):
-        reg.loadModel(True)
         reg.loadData()
+        
+        reg.loadModel(True)
         for i in range(3):
             img=self.data[i][0]
             '''
@@ -375,7 +383,7 @@ class textReg:
             cv.imshow('flipt',flip_hv)
             cv.waitKey(0)
             cv.destroyAllWindows()
-        
+    
 
 if __name__=='__main__':
     args=sys.argv
