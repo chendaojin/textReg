@@ -8,6 +8,7 @@ import cv2 as cv
 import random
 import os
 import pickle
+import time
 import sys
 import numpy as np
 import pandas as pd
@@ -20,7 +21,10 @@ from keras.layers import Input,Conv2D,MaxPooling2D,ZeroPadding2D, Dense
 from keras.layers import Flatten,BatchNormalization,Permute,TimeDistributed,Dense,Bidirectional,GRU
 from keras.callbacks import ModelCheckpoint
 from keras.callbacks import Callback
-
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import array_ops
+from keras.backend import ctc_label_dense_to_sparse
+from tensorflow.python.ops import ctc_ops as ctc
 
 from keras import backend as K
 
@@ -34,13 +38,41 @@ class modelHistory(Callback):
         self.lastfile=None
         self.lastloss=-1
         self.lastName=0
-        
-    def on_epoch_end(self,epoch=0,logs=None):
-        if epoch==0 or logs['loss'] <= self.lastloss:
-            self.model.save_weights(self.filepath+str(self.lastName)+'.h5')
-            self.lastfile=self.filepath+str(self.lastName)+'.h5'
+        self.lastTime=time.time()
+    def on_batch_end(self,batch,logs=None):
+        nowTime=time.time()
+        if nowTime-self.lastTime <= 1800:
+            return
+        print(' ',logs['loss'],self.lastloss)
+        nowName=(self.lastName+1)%2
+        self.model.save_weights(self.filepath+str(nowName)+'.h5')
+        self.lastfile=self.filepath+str(nowName)+'.h5'
+        self.lastloss=logs['loss']
+        self.lastName=nowName
+        self.lastTime=nowTime
+        '''
+        if self.lastloss==-1 or logs['loss'] <= self.lastloss:
+            nowName=(self.lastName+1)%2
+            self.model.save_weights(self.filepath+str(nowName)+'.h5')
+            self.lastfile=self.filepath+str(nowName)+'.h5'
             self.lastloss=logs['loss']
-            self.lastName=(self.lastName+1)%2
+            self.lastName=nowName
+            self.lastTime=nowTime
+        else:
+            print('not in')
+        '''
+    def on_epoch_end(self,epoch=0,logs=None):
+        nowTime=time.time()
+        if nowTime-self.lastTime <= 1800:
+            return
+        print(logs['loss'],self.lastloss)
+        if self.lastloss==-1 or logs['loss'] <= self.lastloss:
+            nowName=(self.lastName+1)%2
+            self.model.save_weights(self.filepath+str(nowName)+'.h5')
+            self.lastfile=self.filepath+str(nowName)+'.h5'
+            self.lastloss=logs['loss']
+            self.lastName=nowName
+            self.lastTime=nowTime
         else:
             print('not in')
         '''
@@ -73,12 +105,12 @@ class textReg:
         self.ch=[]
 
         #每张训练图片的大小
-        self.height=128
+        self.height=64
         self.width=500
 
         #模型的训练及预测信息
         self.rateTrain=0.7
-        self.batch_size=16
+        self.batch_size=8+4
         self.epochs=1000
         self.weightFile='modelWeights'
         self.saveNow='0'
@@ -94,7 +126,7 @@ class textReg:
         print(self.characters,len(self.characters))
         if flag:
             self.dic=dict(zip(self.characters,range(len(self.characters))))
-            with open('dic1.pkl','wb') as f:
+            with open('dic.pkl','wb') as f:
                 pickle.dump(self.dic,f)
             self.dic={}
 
@@ -134,11 +166,7 @@ class textReg:
             cv.imwrite('data\\'+str(self.num)+'.jpg',perspective)
             print(perspective.shape)
             print(x[8])
-        if x[8]=='小童话?大智慧?小百科?大启发':
-            print(l0,l1,l2,l3)
-            print(pts)
-            cv.imshow('cut',perspective)
-            cv.waitKey(0)
+
         self.data.append((perspective,str(x[8])))
         self.num+=1
     def cutPictures(self,imageDir,textDir):
@@ -168,8 +196,7 @@ class textReg:
         #label[0]=charactersNum
         for i, char in enumerate(text):
             if char not in self.dic.keys():
-                label[i]=0
-                continue
+                char='?'
             index = self.dic[char]
             label[i] = int(index)
             #label[i*2+2]=charactersNum
@@ -178,7 +205,7 @@ class textReg:
     def loadData(self):
         with open('data.pkl','rb') as f:
             self.data=pickle.load(f)
-        self.data=self.data[:1000]
+        self.data=self.data
         #random.shuffle(self.data)
         self.num=len(self.data)
         """
@@ -192,9 +219,6 @@ class textReg:
         #加载字典,字典大小与模型相关
         with open('dic.pkl','rb') as f:
             self.dic=pickle.load(f)
-        with open('dic1.pkl','rb') as f:
-            dic1=pickle.load(f)
-        print(set(self.dic.keys())-set(dic1.keys()),set(dic1.keys())-set(self.dic.keys()))
         self.nclass=len(self.dic)
         self.characters=set(self.dic)
         self.ch=[0]*self.nclass
@@ -215,44 +239,90 @@ class textReg:
         else :
             print('not exist modelWeights.h5')
     def gen(self,data,flag):
-        
+        #inputH,inputV, labels, inputH_length, inputV_length,label_length
+        def rot90(img):
+            pts1=np.float32([[0,0],[img.shape[1],0],[img.shape[1],img.shape[0]],[0,img.shape[0]]])
+            pts2=np.float32([[0,img.shape[1]],[0.0,0],[img.shape[0],0],[img.shape[0],img.shape[1]]])
+            #print(pts1,pts2)
+            M = cv.getPerspectiveTransform(pts1,pts2)
+            ro = cv.warpPerspective(img,M,(img.shape[0],img.shape[1]))
+            #cv.imshow('raw image',img)
+            #cv.imshow('rotation',ro)
+            #print(img.shape,ro.shape)
+            #cv.waitKey(0)
+            #cv.destroyAllWindows()
+            return ro
+        def randomImg(img):
+            u=random.randint(0,3)
+            if u==0:
+                return img
+            if u==1:
+                return cv.flip(img,1)
+            if u==2:
+                return cv.flip(img,0)
+            if u==3:
+                return cv.flip(img,-1)
         while True:
             i = 0
             n = len(data)
-            X=[]
+            XH=[]
             Y=[]
+            XV=[]
+            rate=[]
             cnt=0
+            maxWidth=0
+            maxHeight=0
             for i in range(n):
                 '''
-                数据增强，加水平翻转，垂直翻转，对角线旋转
+                数据增强，随机采样，原图、水平翻转、垂直翻转、对角线旋转
                 '''
                 img=data[i][0]
-                Y.append(data[i][1])
+                maxWidth=max(maxWidth,img.shape[1])
+                maxHeight=max(maxHeight,img.shape[0])
+                rate.append(img.shape[1]/img.shape[0])
+                #imgV=
                 if flag=='train':
-                    flip_h=cv.flip(img,1)
-                    flip_v=cv.flip(img,0)
-                    flip_hv=cv.flip(img,-1)
-                    X.append(cv.resize(img,(self.width,self.height)))
-                    X.append(cv.resize(flip_h,(self.width,self.height)))
-                    X.append(cv.resize(flip_v,(self.width,self.height)))
-                    X.append(cv.resize(flip_hv,(self.width,self.height)))
-                    Y.append(data[i][1])
-                    Y.append(data[i][1])
-                    Y.append(data[i][1])
-                    cnt+=4
+                    imgH=randomImg(img)
                 else:
-                    cnt+=1
-                if cnt==self.batch_size or i==n-1:
-                    input_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,X)))
+                    imgH=img
+                imgV=rot90(imgH)
+                XH.append(imgH)
+                XV.append(imgV)
+                Y.append(data[i][1])
+                cnt+=1
+                if cnt==self.batch_size :
                     label_length=np.array(list(map(lambda x:len(x),Y)))
                     maxLabelLength=max(label_length)
-                    nowY=np.array(list(map(lambda x:self.one_hot(maxLabelLength,x),Y)),
-                               dtype=object)
-                    nowX=np.array(X)
-                    yield ([nowX,nowY,input_length,label_length],np.ones(cnt))
-                    X=[]
+                    nowXH=list(map(lambda x:cv.resize(x,(min(self.width,maxWidth),self.height)),XH))
+                    nowXV=list(map(lambda x:cv.resize(x,(min(self.width,maxHeight),self.height)),XV))
+                    #nowXH=np.array(list(map(lambda x:int(x.shape[1]/4)+1,XH)))
+                    inputH_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,nowXH)))
+                    inputV_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,nowXV)))
+                    
+                    nowY=np.array(list(map(lambda x:self.one_hot(maxLabelLength,x),Y)))
+                    nowXH=np.array(nowXH)
+                    nowXV=np.array(nowXV)
+                    rate=np.array(rate)
+                    '''
+                    for x in range(cnt):
+                        cv.imshow('nowxh',nowXH[x])
+                        cv.imshow('nowxv',nowXV[x])
+                        cv.waitKey(0)
+                    cv.destroyAllWindows()
+                    '''
+                    if flag=='test':
+                        print('test')
+                        yield ([nowXH,inputH_length,nowXV,inputV_length])
+                        #inputH,inputV, labels, inputH_length, inputV_length,label_length
+                    else:
+                        yield ([nowXH,nowXV,nowY,inputH_length,inputV_length,label_length,rate],np.ones(cnt))
+                    XH=[]
+                    XV=[]
                     Y=[]
+                    rate=[]
                     cnt=0
+                    maxWidth=0
+                    maxHeight=0
                     
     def train(self):
 
@@ -261,12 +331,29 @@ class textReg:
         callbacks_list = [checkpoint]
         trainNum=int(self.num*self.rateTrain)
         valiNum=self.num-trainNum
-        print('steps_per_epoch=',(trainNum*4-1)//self.batch_size+1)
-        self.model.fit_generator(self.gen(self.data[:trainNum]),steps_per_epoch=(trainNum*4-1)//self.batch_size+1,epochs=self.epochs,
-                            callbacks=callbacks_list,validation_data=self.gen(self.data[-valiNum:]),
-                            validation_steps=(valiNum*4-1)//self.batch_size+1)
+        print('steps_per_epoch=',(trainNum-1)//self.batch_size+1)
+        trainData=self.data[:trainNum]
+        valData=self.data[-valiNum:]
+        random.shuffle(trainData)
+        random.shuffle(valData)
+        print(trainNum-(trainNum-1)//self.batch_size*self.batch_size)
+        self.model.fit_generator(self.gen(trainData,'train'),steps_per_epoch=trainNum//self.batch_size,epochs=self.epochs,
+                            callbacks=callbacks_list,validation_data=self.gen(valData,'train'),
+                            validation_steps=min(valiNum//self.batch_size,200))
 
     def predict(self):
+        trainNum=int(self.num*self.rateTrain)
+        valiNum=self.num-trainNum
+        predH=self.model.predict_generator(self.gen(self.data[-10:],'test'),steps=(10-1)//self.batch_size+1)
+        print(predH)
+        input_length=np.array([self.width/4+1]*10)
+        predH=K.ctc_decode(predH,input_length,greedy=False,beam_width=6,top_paths=3)
+        print(predH[0])
+        print(predH[1])
+        print(predH[0][0])
+        predH=predH[0][0].eval(session=tf.Session())
+        print(predH)
+        '''
         input_length=np.array(list(map(lambda x:int(x.shape[1]/4)+1,self.pic[:int(self.num*self.rateTrain)])))
         label_length=np.array(list(map(lambda x:len(x),self.text[:int(self.num*self.rateTrain)])))
         maxLabelLength=max(label_length)
@@ -304,14 +391,32 @@ class textReg:
                 print(res1,res2)
                 cv.imshow(str(i),X[i])
                 cv.waitKey(0)
+        '''
 
         '''
         for i in range(10):
             print(pre[0][i].eval(session=tf.Session()),Y[i])
         '''
+
     def ctc_lambda_func(self,args):
-        y_pred, labels, input_length, label_length = args
-        return K.ctc_batch_cost(labels, y_pred, input_length, label_length)
+        y_pred,y_true, input_length,label_length= args
+        label_length = math_ops.to_int32(array_ops.squeeze(label_length))
+        input_length = math_ops.to_int32(array_ops.squeeze(input_length))
+        sparse_labels = math_ops.to_int32(ctc_label_dense_to_sparse(y_true, label_length))
+        y_pred = math_ops.log(array_ops.transpose(y_pred, perm=[1, 0, 2]) + 1e-7)
+        return array_ops.expand_dims(ctc.ctc_loss(inputs=y_pred, labels=sparse_labels, sequence_length=input_length,
+                                                  ignore_longer_outputs_than_inputs=True), 1)
+    def decode(self,args):
+        predH,inputH_length,predV,inputV_length=args
+        inputH_length=tf.squeeze(inputH_length)
+        inputV_length=tf.squeeze(inputV_length)
+        pre1=K.ctc_decode(predH,inputH_length,greedy=False,beam_width=6,top_paths=3)
+        pre2=K.ctc_decode(predV,inputV_length,greedy=False,beam_width=6,top_paths=3)
+        #pre[0][0].eval(session=tf.Session())
+        return predH
+    def mm(self,args):
+        lossH, lossV,rate=args
+        return tf.where(lossH<(lossV*rate),lossH,lossV)
     def getmodel(self,height,flag):#if flag=False,return basemodel,if flag =True return model
         rnnunit  = 256
         input = Input(shape=(height,None,3),name='the_input')
@@ -333,59 +438,92 @@ class textReg:
         m = MaxPooling2D(pool_size=(2,2),strides=(2,1),padding='valid',name='pool4')(m)#height/2,width-1
         m = Conv2D(512,kernel_size=(2,2),activation='relu',padding='valid',name='conv7')(m)#height-1,width-1
         
-        m1 = TimeDistributed(Flatten(),name='timedistrib')(m)
-        m1 = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstmv1')(m1)
-        m1 = Dense(rnnunit,name='blstm1_out',activation='linear')(m1)
-        m1 = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstmv2')(m1)
-        
         m = Permute((2,1,3),name='permute')(m)
         
         m = TimeDistributed(Flatten(),name='timedistrib')(m)
     
-        m = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstm1')(m)
-        m = Dense(rnnunit,name='blstm1_out',activation='linear')(m)
-        m = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstm2')(m)
-        y_pred = Dense(self.nclass+1,name='blstm2_out_1',activation='softmax')(m)
-        if not flag:
-            print('not in ')
-            basemodel = Model(inputs=input,outputs=y_pred)
-            basemodel.summary()
-            return basemodel
-    
+        m = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstm1_')(m)
+        m = Dense(rnnunit,name='blstm1_out_',activation='linear')(m)
+        m = Bidirectional(GRU(rnnunit,return_sequences=True),name='blstm2_')(m)
+
+        y_pred = Dense(self.nclass+1,name='blstm2_out_',activation='softmax')(m)
+        
         labels = Input(name='the_labels', shape=[None,], dtype='float32')
         input_length = Input(name='input_length', shape=[1], dtype='int64')
         label_length = Input(name='label_length', shape=[1], dtype='int64')
         loss_out = Lambda(self.ctc_lambda_func, output_shape=(1,), name='ctc')([y_pred, labels, input_length, label_length])
-        model = Model(inputs=[input, labels, input_length, label_length], outputs=[loss_out])
+
+        model1 = Model(inputs=[input, labels, input_length, label_length], outputs=[loss_out])
+        '''
+        sgd = SGD(lr=0.001, decay=1e-6, momentum=0.9, nesterov=True, clipnorm=5)
+        
+        model1.compile(loss={'ctc': lambda y_true, y_pred: y_pred}, optimizer=sgd)
+        model1.summary()
+        return model1
+        '''
+        inputH=Input(shape=(height,None,3),name='the_inputH')
+        inputV=Input(shape=(height,None,3),name='the_inputV')
+        inputH_length = Input(name='inputH_length', shape=[1], dtype='int64')
+        inputV_length = Input(name='inputV_length', shape=[1], dtype='int64')
+        inputRate=Input(name='inputRate', shape=[1], dtype='float32')
+
+        lossH=model1([inputH, labels, inputH_length, label_length])
+        lossV=model1([inputV, labels, inputV_length, label_length])
+        loss=Lambda(self.mm, output_shape=[1], name='minloss')([lossH, lossV,inputRate])
+        model2 = Model(inputs=[inputH,inputV, labels, inputH_length, inputV_length,label_length,inputRate], outputs=[loss])
+        sgd = SGD(lr=0.001, decay=1e-6, momentum=0.9, nesterov=True, clipnorm=5)
+        
+        model2.compile(loss={'minloss': lambda y_true, y_pred: y_pred}, optimizer=sgd)
+        model2.summary()
+        return model2
+        '''
+        pred=Model(inputs=input,outputs=y_pred)
+        
+        inputH=Input(shape=(height,None,3),name='the_inputH')
+        inputV=Input(shape=(height,None,3),name='the_inputV')
+
+        predH=pred(inputH)
+        predV=pred(inputV)
+        inputH_length = Input(name='inputH_length', shape=[1], dtype='int64')
+        inputV_length = Input(name='inputV_length', shape=[1], dtype='int64')
+
+        if not flag:
+            print('not in ')
+            
+            pre=Lambda(self.decode,output_shape=None,name='decode')([predH,inputH_length,predV,inputV_length])
+            preModel=Model(inputs=[inputH,inputH_length,inputV,inputV_length],outputs=[pre])
+            
+            #preModel=Model(inputs=[inputH,inputH_length,inputV,inputV_length],outputs=[predH,predV])
+            preModel.summary()
+            return preModel
+    
+        labels = Input(name='the_labels', shape=[None,], dtype='float32')
+        label_length = Input(name='label_length', shape=[1], dtype='int64')
+        
+        loss_out = Lambda(self.ctc_lambda_func, output_shape=(1,), name='ctc')([predH, inputH_length,predV,inputV_length, labels, label_length])
+
+
+        model = Model(inputs=[inputH,inputV, labels, inputH_length, inputV_length,label_length], outputs=[loss_out])
         sgd = SGD(lr=0.001, decay=1e-6, momentum=0.9, nesterov=True, clipnorm=5)
         
         model.compile(loss={'ctc': lambda y_true, y_pred: y_pred}, optimizer=sgd)
         model.summary()
         
-        return model
-    def test(self):
-        reg.loadData()
         
-        reg.loadModel(True)
-        for i in range(3):
-            img=self.data[i][0]
-            '''
-            flipud=tf.image.flip_up_down(img)
-            fliplr=tf.image.flip_left_right(img)
-            flipt=tf.image.transpose_image(img)
-            '''
-            flip_h=cv.flip(img,1)
-            flip_v=cv.flip(img,0)
-            flip_hv=cv.flip(img,-1)
-            cv.imshow('raw image',img)
-            cv.imshow('flipud',flip_h)
-            cv.imshow('fliplr',flip_v)
-            cv.imshow('flipt',flip_hv)
-            cv.waitKey(0)
-            cv.destroyAllWindows()
+        return model
+        '''
+    def test(self):
+        self.loadData()
+        self.loadModel(True)
+        for i in self.gen(self.data,'train'):
+            pass
+
+        
+        
     
 
 if __name__=='__main__':
+    os.environ["TF_CPP_MIN_LOG_LEVEL"]='3'
     args=sys.argv
     print(args)
     reg=textReg()
@@ -403,9 +541,9 @@ if __name__=='__main__':
         reg.loadModel(True)
         reg.loadData()
         reg.train()
-    if type=='predic':
+    if type=='predict':
         reg.loadModel(False)
         reg.loadData()
-        #reg.predict()
+        reg.predict()
     if type=='test':
         reg.test()
